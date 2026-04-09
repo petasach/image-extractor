@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Universal Image Localizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <style>
+    body {
+      font-family: Arial;
+      background: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+
+    .box {
+      background: white;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+      text-align: center;
+      width: 360px;
+    }
+
+    button {
+      margin-top: 15px;
+      padding: 10px 20px;
+      border: none;
+      background: black;
+      color: white;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .progress {
+      width: 100%;
+      height: 10px;
+      background: #ddd;
+      border-radius: 6px;
+      margin-top: 20px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: black;
+      transition: width 0.2s;
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <h2>Universal Image Localizer</h2>
+    <div style="font-size: 12px; color: #666; margin-top: -10px; margin-bottom: 20px;">Downloads all images (.png, .jpg,
+      .svg, etc.)</div>
+
+    <input type="file" id="files" multiple webkitdirectory />
+    <button id="processBtn" onclick="processFiles()">Process</button>
+    <button id="downloadBtn" onclick="downloadZip()" disabled>Download</button>
+
+    <div class="progress">
+      <div id="bar" class="progress-bar"></div>
+    </div>
+
+    <p id="status"></p>
+  </div>
+
+  <script>
+    const URL_REGEX = /https?:\/\/[^\s"'<>(),;]+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?[^\s"'<>(),;]*)?/gi;
+
+    let preparedBlob = null;
+
+    function updateBar(percent) {
+      document.getElementById('bar').style.width = percent + '%';
+    }
+
+    function setStatus(text) {
+      document.getElementById('status').innerText = text;
+    }
+
+    async function fetchImage(url) {
+      const res = await fetch(url);
+      return await res.blob();
+    }
+
+    function getRootFolder(files) {
+      const firstPath = files[0].webkitRelativePath;
+      return firstPath.split('/')[0];
+    }
+
+    async function processFiles() {
+      const input = document.getElementById('files');
+      let files = Array.from(input.files).filter(file => {
+        const p = file.webkitRelativePath;
+        return !p.includes('/node_modules/') && !p.includes('/.git/') && !p.includes('/.next/');
+      });
+
+      if (!files.length) {
+        setStatus('No valid files found or folder is empty.');
+        return;
+      }
+
+      document.getElementById('processBtn').disabled = true;
+      updateBar(0);
+
+      const rootFolder = getRootFolder(files);
+      const zip = new JSZip();
+      const imageFolder = zip.folder(rootFolder + '/images');
+
+      let imageMap = {};
+      let allImageUrls = new Set();
+
+      // STEP 1: scan files
+      setStatus('Uploading & scanning files...');
+
+      let processed = 0;
+
+      for (let file of files) {
+        const ext = file.name.split('.').pop();
+        const textExtensions = ['html', 'js', 'jsx', 'ts', 'tsx', 'css'];
+
+        if (textExtensions.includes(ext)) {
+          try {
+            const content = await file.text();
+            const matches = content.match(URL_REGEX);
+            if (matches) matches.forEach(url => allImageUrls.add(url));
+          } catch (err) {
+            console.warn(`Could not read ${file.name} for parsing:`, err);
+          }
+        }
+
+        processed++;
+        updateBar((processed / files.length) * 30);
+      }
+
+      // STEP 2: download images
+      setStatus('Downloading images...');
+
+      const urls = Array.from(allImageUrls);
+      let downloaded = 0;
+      let failedUrls = [];
+
+      await Promise.all(
+        urls.map(async (url) => {
+          try {
+            const blob = await fetchImage(url);
+            const cleanUrl = url.split('?')[0].split('#')[0];
+            const filename = cleanUrl.split('/').pop();
+
+            imageFolder.file(filename, blob);
+            imageMap[url] = filename;
+          } catch (e) {
+            console.log('Failed:', url);
+            failedUrls.push(url);
+          }
+
+          downloaded++;
+          updateBar(30 + (downloaded / urls.length) * 30);
+        })
+      );
+
+      // STEP 3: rewrite files
+      setStatus('Rewriting files...');
+
+      processed = 0;
+
+      for (let file of files) {
+        const ext = file.name.split('.').pop();
+        const textExtensions = ['html', 'js', 'jsx', 'ts', 'tsx', 'css'];
+
+        let targetPath = file.webkitRelativePath;
+
+        if (textExtensions.includes(ext)) {
+          try {
+            let content = await file.text();
+
+            for (let url of urls) {
+              if (imageMap[url]) {
+                content = content.split(url).join('/images/' + imageMap[url]);
+              }
+            }
+
+            zip.file(targetPath, content);
+          } catch (err) {
+            zip.file(targetPath, file);
+          }
+        } else {
+          zip.file(targetPath, file);
+        }
+
+        processed++;
+        updateBar(60 + (processed / files.length) * 20);
+      }
+
+      // STEP 4: prepare ZIP
+      setStatus('Preparing files for download...');
+
+      preparedBlob = await zip.generateAsync({ type: 'blob' });
+
+      updateBar(100);
+
+      document.getElementById('downloadBtn').disabled = false;
+      if (failedUrls.length > 0) {
+        setStatus(`Files ready. Note: ${failedUrls.length} images failed to download (check console).`);
+      } else {
+        setStatus('Files ready. Click download.');
+      }
+    }
+
+    function downloadZip() {
+      if (!preparedBlob) return;
+
+      setStatus('Downloading files...');
+      updateBar(0);
+
+      // simulate progress for UX
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 10;
+        updateBar(progress);
+        if (progress >= 100) clearInterval(interval);
+      }, 50);
+
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(preparedBlob);
+      link.download = 'fixed-project.zip';
+      link.click();
+    }
+  </script>
+</body>
+
+</html>
