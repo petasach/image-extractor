@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
-  <title>Universal Image Excractor</title>
+  <title>Universal Image Extractor</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
   <style>
@@ -95,8 +95,18 @@
     }
 
     async function fetchImage(url) {
-      // FIX: use no-cors so CDN-hosted images aren't blocked by CORS policy
-      const res = await fetch(url, { mode: 'no-cors' });
+      // First try direct fetch (works if the server allows CORS)
+      try {
+        const res = await fetch(url);
+        if (res.ok) return await res.blob();
+      } catch (e) {
+        // fall through to proxy
+      }
+
+      // Fall back to a CORS proxy for CDN-hosted images that block direct fetches
+      const proxy = 'https://corsproxy.io/?' + encodeURIComponent(url);
+      const res = await fetch(proxy);
+      if (!res.ok) throw new Error(`Proxy fetch failed: ${res.status}`);
       return await res.blob();
     }
 
