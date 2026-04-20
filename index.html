@@ -95,7 +95,8 @@
     }
 
     async function fetchImage(url) {
-      const res = await fetch(url);
+      // FIX: use no-cors so CDN-hosted images aren't blocked by CORS policy
+      const res = await fetch(url, { mode: 'no-cors' });
       return await res.blob();
     }
 
@@ -121,7 +122,9 @@
 
       const rootFolder = getRootFolder(files);
       const zip = new JSZip();
-      const imageFolder = zip.folder(rootFolder + '/images');
+
+      // FIX: images go into public/images/ so Vite/Vercel serves them at /images/
+      const imageFolder = zip.folder(rootFolder + '/public/images');
 
       let imageMap = {};
       let allImageUrls = new Set();
@@ -156,12 +159,25 @@
       let downloaded = 0;
       let failedUrls = [];
 
+      // FIX: track used filenames to avoid collisions
+      const usedFilenames = new Set();
+
       await Promise.all(
         urls.map(async (url) => {
           try {
             const blob = await fetchImage(url);
             const cleanUrl = url.split('?')[0].split('#')[0];
-            const filename = cleanUrl.split('/').pop();
+            let filename = cleanUrl.split('/').pop();
+
+            // FIX: deduplicate filenames by prepending a counter if the name is already taken
+            if (usedFilenames.has(filename)) {
+              const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
+              const base = filename.includes('.') ? filename.slice(0, filename.lastIndexOf('.')) : filename;
+              let counter = 1;
+              while (usedFilenames.has(`${base}_${counter}${ext}`)) counter++;
+              filename = `${base}_${counter}${ext}`;
+            }
+            usedFilenames.add(filename);
 
             imageFolder.file(filename, blob);
             imageMap[url] = filename;
